@@ -136,7 +136,8 @@ export default function Dashboard() {
     return () => subscription?.unsubscribe?.();
   }, []);
 
-  const loadProfileFromSupabase = async (userId, email) => {
+const loadProfileFromSupabase = async (userId, email) => {
+  try {
     const { data: profile, error } = await supabase
       .from("profiles")
       .select("full_name")
@@ -157,7 +158,15 @@ export default function Dashboard() {
       name: email,
       email,
     };
-  };
+
+  } catch (err) {
+    console.warn("Profile fetch failed:", err);
+    return {
+      name: email,
+      email,
+    };
+  }
+};
 
   const loadUserData = async (userEmail) => {
     setLoadingData(true);
@@ -250,87 +259,110 @@ export default function Dashboard() {
     }
   };
 
-  const handleLogin = async (event) => {
-    event.preventDefault();
-    if (!loginName.trim() || !loginEmail.trim() || !loginPassword.trim()) {
-      setLoginError("Please enter name, email, and password.");
-      return;
-    }
+const handleLogin = async (event) => {
+  event.preventDefault();
 
-    setAuthLoading(true);
-    setLoginError("");
-    const normalizedEmail = loginEmail.trim().toLowerCase();
+  // ✅ FIXED VALIDATION
+  if (!loginEmail.trim() || !loginPassword.trim() || (isSignUp && !loginName.trim())) {
+    setLoginError(
+      isSignUp
+        ? "Please enter name, email, and password."
+        : "Please enter email and password."
+    );
+    return;
+  }
 
-    try {
-      if (hasSupabase) {
-        if (isSignUp) {
-          const { data, error } = await supabase.auth.signUp(
-            {
-              email: normalizedEmail,
-              password: loginPassword,
-            },
-            {
-              data: {
-                full_name: loginName.trim(),
-              },
-            }
-          );
+  setAuthLoading(true);
+  setLoginError("");
 
-          if (error) {
-            setLoginError(error.message || "Sign up failed.");
-            return;
-          }
+  const normalizedEmail = loginEmail.trim().toLowerCase();
 
-          if (data?.user) {
-            await supabase.from("profiles").insert({
-              user_id: data.user.id,
-              email: normalizedEmail,
-              full_name: loginName.trim(),
-            });
+  try {
+    if (hasSupabase) {
 
-            const userData = {
-              name: loginName.trim(),
-              email: data.user.email,
-            };
-            sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
-            setUser(userData);
-            return;
-          }
-
-          setLoginError("Account created. Check your email to confirm and then sign in.");
-          return;
-        }
-
-        const { data, error } = await supabase.auth.signInWithPassword({
+      // =========================
+      // ✅ SIGN UP
+      // =========================
+      if (isSignUp) {
+        const { data, error } = await supabase.auth.signUp({
           email: normalizedEmail,
           password: loginPassword,
+          options: {
+            data: {
+              full_name: loginName.trim(),
+            },
+          },
         });
 
         if (error) {
-          setLoginError(error.message || "Sign in failed.");
+          setLoginError(error.message || "Sign up failed.");
           return;
         }
 
         if (data?.user) {
-          const profileUser = await loadProfileFromSupabase(data.user.id, data.user.email);
-          sessionStorage.setItem("ultraTrackerUser", JSON.stringify(profileUser));
-          setUser(profileUser);
+          // ✅ safer insert
+          await supabase.from("profiles").upsert({
+            user_id: data.user.id,
+            email: normalizedEmail,
+            full_name: loginName.trim(),
+          });
+
+          const userData = {
+            name: loginName.trim(),
+            email: data.user.email,
+          };
+
+          sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+          setUser(userData);
           return;
         }
+
+        setLoginError("Account created. Please verify email and login.");
+        return;
       }
 
-      const userData = {
-        name: loginName.trim(),
+      // =========================
+      // ✅ LOGIN
+      // =========================
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: normalizedEmail,
-      };
-      sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
-      setUser(userData);
-    } catch (error) {
-      setLoginError(error.message || "Authentication failed.");
-    } finally {
-      setAuthLoading(false);
+        password: loginPassword,
+      });
+
+      if (error) {
+        setLoginError("Invalid email or password.");
+        return;
+      }
+
+      if (data?.user) {
+        const profileUser = await loadProfileFromSupabase(
+          data.user.id,
+          data.user.email
+        );
+
+        sessionStorage.setItem("ultraTrackerUser", JSON.stringify(profileUser));
+        setUser(profileUser);
+        return;
+      }
     }
-  };
+
+    // =========================
+    // ✅ FALLBACK (NO SUPABASE)
+    // =========================
+    const userData = {
+      name: loginName.trim() || "User",
+      email: normalizedEmail,
+    };
+
+    sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+    setUser(userData);
+
+  } catch (error) {
+    setLoginError(error.message || "Authentication failed.");
+  } finally {
+    setAuthLoading(false);
+  }
+};
 
   const handleLogout = async () => {
     if (hasSupabase) {
@@ -440,7 +472,8 @@ export default function Dashboard() {
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
         <div className="w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl">
           <div className="bg-slate-900 px-8 py-10 text-center text-white">
-            <h1 className="text-3xl font-bold">Atharsh's Scalar Tracker Sign-In</h1>
+            <h1 className="text-3xl font-bold">Scalar Tracker - Software Engineering <br></br>
+               Sign-In</h1>
             <p className="mt-2 text-sm text-slate-300">Sign in to access your learning tracker.</p>
           </div>
           <div className="px-8 py-10">
@@ -450,15 +483,17 @@ export default function Dashboard() {
               </div>
             )}
             <form onSubmit={handleLogin} className="space-y-4">
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-slate-700">Name</label>
-                <input
-                  value={loginName}
-                  onChange={(e) => setLoginName(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900 focus:border-slate-600 focus:outline-none"
-                  placeholder="Your name"
-                />
-              </div>
+              {isSignUp && (
+  <div>
+    <label className="mb-2 block text-sm font-semibold text-slate-700">Name</label>
+    <input
+      value={loginName}
+      onChange={(e) => setLoginName(e.target.value)}
+      className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900 focus:border-slate-600 focus:outline-none"
+      placeholder="Your name"
+    />
+  </div>
+)}
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-700">Email</label>
                 <input
@@ -512,7 +547,7 @@ export default function Dashboard() {
       <header className="bg-slate-900 text-white shadow-sm">
         <div className="mx-auto max-w-[1200px] px-4 py-4 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
-            <div className="text-2xl font-extrabold tracking-tight">Atharsh's Scalar Tracker</div>
+            <div className="text-2xl font-extrabold tracking-tight">Scalar Tracker - Software Engineering <br></br></div>
             <span className="hidden text-sm text-slate-300 md:inline">Learning</span>
           </div>
           <div className="flex items-center gap-4">
