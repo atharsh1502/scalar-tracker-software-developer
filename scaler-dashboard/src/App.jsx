@@ -1,4 +1,7 @@
 import React, { useEffect, useState } from "react";
+import { supabase } from "./supabaseClient";
+
+const hasSupabase = Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
 
 const Card = ({ children, className = "", ...props }) => (
   <div className={`bg-white border border-slate-200 shadow-sm rounded-3xl ${className}`} {...props}>
@@ -84,20 +87,143 @@ export default function Dashboard() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState("");
   const [lastNewsRefresh, setLastNewsRefresh] = useState(new Date());
+  const [loadingData, setLoadingData] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [isSignUp, setIsSignUp] = useState(false);
   const [todayPlan, setTodayPlan] = useState([]);
 
   useEffect(() => {
-    const savedUser = sessionStorage.getItem("ultraTrackerUser");
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+    const restoreSession = async () => {
+      if (!hasSupabase) return;
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.getSession();
+
+      if (error) {
+        console.warn("Supabase session restore failed:", error);
+        return;
+      }
+
+      if (session?.user) {
+        const sessionUser = session.user;
+        const userData = {
+          name: sessionUser.user_metadata?.full_name || sessionUser.email,
+          email: sessionUser.email,
+        };
+        sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+        setUser(userData);
+      } else {
+        const savedUser = sessionStorage.getItem("ultraTrackerUser");
+        if (savedUser) {
+          setUser(JSON.parse(savedUser));
+        }
+      }
+    };
+
+    restoreSession();
+
+    if (!hasSupabase) return;
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        const sessionUser = session.user;
+        loadProfileFromSupabase(sessionUser.id, sessionUser.email);
+      } else {
+        setUser(null);
+      }
+    });
+
+    return () => subscription?.unsubscribe?.();
   }, []);
+
+  const loadProfileFromSupabase = async (userId, email) => {
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("full_name")
+      .eq("user_id", userId)
+      .single();
+
+    if (!error && profile?.full_name) {
+      const userData = {
+        name: profile.full_name,
+        email,
+      };
+      sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+      setUser(userData);
+      return userData;
+    }
+
+    return {
+      name: email,
+      email,
+    };
+  };
+
+  const loadUserData = async (userEmail) => {
+    setLoadingData(true);
+    try {
+      if (hasSupabase) {
+        const { data: rows, error } = await supabase
+          .from("tracker_topics")
+          .select("*")
+          .eq("user_email", userEmail)
+          .order("id", { ascending: true });
+
+        if (error) {
+          throw error;
+        }
+
+        if (rows?.length) {
+          setData(
+            rows.map((row) => ({
+              id: row.id,
+              category: row.category,
+              topic: row.topic,
+              status: row.status || "Not Started",
+              date: row.date || "",
+            }))
+          );
+          return;
+        }
+
+        const initialRows = topics.map((item) => ({
+          ...item,
+          user_email: userEmail,
+        }));
+
+        const { data: inserted, error: insertError } = await supabase
+          .from("tracker_topics")
+          .insert(initialRows);
+
+        if (insertError) {
+          throw insertError;
+        }
+
+        setData(
+          inserted.map((row) => ({
+            id: row.id,
+            category: row.category,
+            topic: row.topic,
+            status: row.status || "Not Started",
+            date: row.date || "",
+          }))
+        );
+        return;
+      }
+    } catch (error) {
+      console.warn("Supabase load failed:", error);
+    } finally {
+      setLoadingData(false);
+    }
+
+    const key = `ultraTracker_${userEmail}`;
+    const saved = localStorage.getItem(key);
+    setData(saved ? JSON.parse(saved) : topics);
+  };
 
   useEffect(() => {
     if (!user) return;
-    const key = `ultraTracker_${user.email}`;
-    const saved = localStorage.getItem(key);
-    setData(saved ? JSON.parse(saved) : topics);
+    loadUserData(user.email);
   }, [user]);
 
   useEffect(() => {
@@ -106,32 +232,110 @@ export default function Dashboard() {
     localStorage.setItem(key, JSON.stringify(data));
   }, [data, user]);
 
-  const updateStatus = (i, status) => {
+  const updateStatus = async (i, status) => {
     const copy = [...data];
     copy[i].status = status;
     copy[i].date = new Date().toLocaleDateString();
     setData(copy);
+
+    if (hasSupabase && copy[i]?.id) {
+      const { error } = await supabase
+        .from("tracker_topics")
+        .update({ status: copy[i].status, date: copy[i].date })
+        .eq("id", copy[i].id);
+
+      if (error) {
+        console.warn("Supabase update failed:", error);
+      }
+    }
   };
 
-  const handleLogin = (event) => {
+  const handleLogin = async (event) => {
     event.preventDefault();
     if (!loginName.trim() || !loginEmail.trim() || !loginPassword.trim()) {
       setLoginError("Please enter name, email, and password.");
       return;
     }
 
-    const normalizedEmail = loginEmail.trim().toLowerCase();
-    const userData = {
-      name: loginName.trim(),
-      email: normalizedEmail,
-    };
-
-    sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
-    setUser(userData);
+    setAuthLoading(true);
     setLoginError("");
+    const normalizedEmail = loginEmail.trim().toLowerCase();
+
+    try {
+      if (hasSupabase) {
+        if (isSignUp) {
+          const { data, error } = await supabase.auth.signUp(
+            {
+              email: normalizedEmail,
+              password: loginPassword,
+            },
+            {
+              data: {
+                full_name: loginName.trim(),
+              },
+            }
+          );
+
+          if (error) {
+            setLoginError(error.message || "Sign up failed.");
+            return;
+          }
+
+          if (data?.user) {
+            await supabase.from("profiles").insert({
+              user_id: data.user.id,
+              email: normalizedEmail,
+              full_name: loginName.trim(),
+            });
+
+            const userData = {
+              name: loginName.trim(),
+              email: data.user.email,
+            };
+            sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+            setUser(userData);
+            return;
+          }
+
+          setLoginError("Account created. Check your email to confirm and then sign in.");
+          return;
+        }
+
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password: loginPassword,
+        });
+
+        if (error) {
+          setLoginError(error.message || "Sign in failed.");
+          return;
+        }
+
+        if (data?.user) {
+          const profileUser = await loadProfileFromSupabase(data.user.id, data.user.email);
+          sessionStorage.setItem("ultraTrackerUser", JSON.stringify(profileUser));
+          setUser(profileUser);
+          return;
+        }
+      }
+
+      const userData = {
+        name: loginName.trim(),
+        email: normalizedEmail,
+      };
+      sessionStorage.setItem("ultraTrackerUser", JSON.stringify(userData));
+      setUser(userData);
+    } catch (error) {
+      setLoginError(error.message || "Authentication failed.");
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    if (hasSupabase) {
+      await supabase.auth.signOut();
+    }
     sessionStorage.removeItem("ultraTrackerUser");
     setUser(null);
     setData([]);
@@ -275,11 +479,28 @@ export default function Dashboard() {
                   placeholder="Enter password"
                 />
               </div>
-              <button type="submit" className="w-full rounded-2xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-yellow-500">
-                Sign in securely
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full rounded-2xl bg-yellow-400 px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-yellow-500 disabled:cursor-not-allowed disabled:bg-slate-500"
+              >
+                {authLoading ? (isSignUp ? "Creating account..." : "Signing in...") : isSignUp ? "Create account securely" : "Sign in securely"}
               </button>
             </form>
-            <p className="mt-6 text-xs text-slate-500">This is a client-side login flow for GitHub Pages deployment. Your session is stored in the browser.</p>
+            <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
+              <button
+                type="button"
+                onClick={() => setIsSignUp((prev) => !prev)}
+                className="font-semibold text-yellow-400 hover:text-yellow-300"
+              >
+                {isSignUp ? "Already have an account? Sign in" : "New here? Create an account"}
+              </button>
+            </div>
+            <p className="mt-4 text-xs text-slate-500">
+              {hasSupabase
+                ? "Your login is secured with Supabase auth."
+                : "This is a client-side login flow for GitHub Pages deployment. Your session is stored in the browser."}
+            </p>
           </div>
         </div>
       </div>
